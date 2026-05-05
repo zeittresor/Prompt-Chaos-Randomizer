@@ -2,6 +2,8 @@
 
 Offline-capable GUI tool for TXT wildcard prompt lists and Stable-Diffusion-style CSV source files.
 
+<img width="1187" height="881" alt="chaos" src="https://github.com/user-attachments/assets/a35ec44e-b4a1-44c9-a170-83bf4f9bb5e6" />
+
 ## What it does
 
 For each processed TXT line or selected CSV field:
