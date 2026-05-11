@@ -101,6 +101,16 @@ prepare_pyqt6_wheelhouse_online.bat  PyQt6 wheel downloader, also called automat
 
 ## Recent fixes
 
+### v1.0.12
+
+- Added the Sentence splitter cleanup preset.
+- Sentence splitter creates one dot-ended sentence/sentence-fragment per TXT wildcard line.
+- Lines without a dot receive a trailing dot first.
+- Duplicate output lines are removed.
+- Short fragments are merged until they reach the configured minimum length where possible.
+- Leftover short fragments are extended with the matching positive/TXT or negative-prompt phrase.
+- Added GUI controls for Processing preset and Min splitter length.
+
 ### v1.0.11
 
 - `install_windows.bat` is now the main smart entry point.
