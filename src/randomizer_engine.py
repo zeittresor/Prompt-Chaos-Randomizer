@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 TextMode = Literal["txt", "csv_prompt", "csv_negative"]
+ProcessingPreset = Literal["chaos", "sentence_splitter"]
 ShuffleMode = Literal["all_halves", "keep_first_halves", "line_insert"]
 SegmentMode = Literal["halves", "quarters", "mixed"]
 PlacementMode = Literal["random", "prepend", "append"]
@@ -20,9 +21,11 @@ DelimiterMode = Literal["auto", "comma", "semicolon", "tab"]
 @dataclass
 class RandomizerOptions:
     mode: TextMode = "txt"
+    processing_preset: ProcessingPreset = "chaos"
     shuffle_mode: ShuffleMode = "all_halves"
     segment_mode: SegmentMode = "halves"
     output_factor: int = 1
+    min_sentence_chars: int = 24
     placement_mode: PlacementMode = "random"
     positive_suffix: str = " anything is matching well."
     negative_suffix: str = " worse looking."
@@ -42,6 +45,7 @@ class RandomizerStats:
     input_path: str
     output_path: str
     mode: str
+    processing_preset: str = "chaos"
     processed_items: int = 0
     untouched_items: int = 0
     zero_dot_fixed: int = 0
@@ -50,6 +54,10 @@ class RandomizerStats:
     chunks_created: int = 0
     segment_mode: str = "halves"
     output_factor: int = 1
+    min_sentence_chars: int = 24
+    deduplicated_items: int = 0
+    short_items_merged: int = 0
+    suffix_extended_items: int = 0
     passes: int = 1
     seed: int | None = None
     warnings: list[str] | None = None
@@ -162,6 +170,147 @@ def split_into_period_segments(text: str) -> list[str]:
     return segments
 
 
+def split_into_wildcard_sentences(text: str, normalize_whitespace: bool = True) -> list[str]:
+    """Split every dot-ended sentence or sentence fragment into its own wildcard line."""
+    text = text.strip()
+    if not text:
+        return []
+
+    sentences: list[str] = []
+    buf: list[str] = []
+    for ch in text:
+        buf.append(ch)
+        if ch == ".":
+            item = "".join(buf).strip()
+            if item:
+                sentences.append(_normalize_spaces(item) if normalize_whitespace else item)
+            buf = []
+
+    trailing = "".join(buf).strip()
+    if trailing:
+        trailing = trailing.rstrip(".").strip() + "."
+        sentences.append(_normalize_spaces(trailing) if normalize_whitespace else trailing)
+
+    return [sentence for sentence in sentences if sentence.strip()]
+
+
+def _dedupe_lines(lines: list[str]) -> tuple[list[str], int]:
+    seen: set[str] = set()
+    result: list[str] = []
+    removed = 0
+    for line in lines:
+        clean = _normalize_spaces(line).strip()
+        if not clean:
+            continue
+        key = clean.casefold()
+        if key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        result.append(clean)
+    return result, removed
+
+
+def _ensure_period(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return text
+    return text if text.endswith(".") else text + "."
+
+
+def _merge_short_sentence_lines(lines: list[str], min_chars: int, suffix: str, normalize_whitespace: bool = True) -> tuple[list[str], int, int]:
+    min_chars = max(1, int(min_chars or 24))
+    output: list[str] = []
+    short_bucket: list[str] = []
+    merged_count = 0
+    suffix_extended = 0
+
+    for line in lines:
+        clean = _normalize_spaces(line) if normalize_whitespace else line.strip()
+        if len(clean) >= min_chars:
+            output.append(clean)
+        else:
+            short_bucket.append(clean)
+
+    i = 0
+    while i < len(short_bucket):
+        combined = short_bucket[i]
+        used = 1
+        i += 1
+        while len(combined) < min_chars and i < len(short_bucket):
+            combined = f"{combined} {short_bucket[i]}"
+            used += 1
+            i += 1
+            combined = _normalize_spaces(combined) if normalize_whitespace else combined.strip()
+        if used > 1:
+            merged_count += used
+        if len(combined) < min_chars:
+            combined = _normalize_spaces(combined + _suffix_with_leading_space(suffix)) if normalize_whitespace else (combined + _suffix_with_leading_space(suffix)).strip()
+            combined = _ensure_period(combined)
+            suffix_extended += 1
+        output.append(combined)
+
+    return output, merged_count, suffix_extended
+
+
+def sentence_splitter_items(items: list[str], options: RandomizerOptions, suffix: str) -> tuple[list[str], RandomizerStats]:
+    warnings: list[str] = []
+    stats = RandomizerStats(
+        input_path="",
+        output_path="",
+        mode=options.mode,
+        processing_preset="sentence_splitter",
+        segment_mode="sentences",
+        output_factor=1,
+        min_sentence_chars=max(1, int(getattr(options, "min_sentence_chars", 24) or 24)),
+        passes=1,
+        seed=options.seed,
+        warnings=warnings,
+    )
+
+    split_lines: list[str] = []
+    for item in items:
+        raw = item.strip()
+        if not raw:
+            stats.untouched_items += 1
+            continue
+        stats.processed_items += 1
+        dot_count = raw.count(".")
+        if dot_count == 0:
+            raw = raw.rstrip() + "."
+            stats.zero_dot_fixed += 1
+        elif dot_count % 2 == 1:
+            stats.odd_dot_fixed += 1
+        else:
+            stats.even_dot_unchanged += 1
+        pieces = split_into_wildcard_sentences(raw, options.normalize_whitespace)
+        split_lines.extend(pieces)
+
+    stats.chunks_created = len(split_lines)
+    unique_lines, removed_before_merge = _dedupe_lines(split_lines)
+    merged_lines, merged_count, suffix_extended = _merge_short_sentence_lines(
+        unique_lines,
+        stats.min_sentence_chars,
+        suffix,
+        options.normalize_whitespace,
+    )
+    final_lines, removed_after_merge = _dedupe_lines(merged_lines)
+    stats.deduplicated_items = removed_before_merge + removed_after_merge
+    stats.short_items_merged = merged_count
+    stats.suffix_extended_items = suffix_extended
+
+    if stats.deduplicated_items:
+        warnings.append(f"Removed {stats.deduplicated_items} duplicate wildcard lines after sentence splitting.")
+    if stats.short_items_merged:
+        warnings.append(f"Merged {stats.short_items_merged} short sentence fragments to reach the minimum line length where possible.")
+    if stats.suffix_extended_items:
+        warnings.append(f"Extended {stats.suffix_extended_items} leftover short line(s) with the matching balancing phrase.")
+    if not final_lines:
+        warnings.append("No usable sentence fragments were produced.")
+
+    return final_lines, stats
+
+
 def _split_segments_evenly(segments: list[str], target_parts: int) -> list[str]:
     """Split segments into up to target_parts non-empty chunk groups."""
     if not segments:
@@ -239,10 +388,12 @@ def randomize_text_items(items: list[str], options: RandomizerOptions, suffix: s
         input_path="",
         output_path="",
         mode=options.mode,
+        processing_preset=options.processing_preset,
         passes=passes,
         seed=options.seed,
         segment_mode=options.segment_mode,
         output_factor=output_factor,
+        min_sentence_chars=max(1, int(getattr(options, "min_sentence_chars", 24) or 24)),
         warnings=warnings,
     )
 
@@ -467,7 +618,10 @@ def _pair_chunks(chunks: list[Chunk], rng: random.Random, avoid_same_source: boo
 
 def process_txt_file(input_path: str | Path, options: RandomizerOptions) -> RandomizerStats:
     lines, encoding = read_text_file(input_path, options.text_encoding)
-    output_lines, stats = randomize_text_items(lines, options, options.positive_suffix)
+    if options.processing_preset == "sentence_splitter":
+        output_lines, stats = sentence_splitter_items(lines, options, options.positive_suffix)
+    else:
+        output_lines, stats = randomize_text_items(lines, options, options.positive_suffix)
     output_path = make_output_path(input_path)
     write_text_file(output_path, output_lines, "utf-8")
     stats.input_path = str(input_path)
@@ -550,7 +704,10 @@ def process_csv_file(input_path: str | Path, options: RandomizerOptions) -> Rand
             continue
         selected_values.append(row[column_index])
 
-    output_values, stats = randomize_text_items(selected_values, options, suffix)
+    if options.processing_preset == "sentence_splitter":
+        output_values, stats = sentence_splitter_items(selected_values, options, suffix)
+    else:
+        output_values, stats = randomize_text_items(selected_values, options, suffix)
 
     output_path = make_output_path(input_path)
     write_text_file(output_path, output_values, "utf-8")
@@ -586,6 +743,8 @@ def preview_items_from_file(input_path: str | Path, options: RandomizerOptions, 
     if options.mode == "txt":
         lines, _encoding = read_text_file(path, options.text_encoding)
         sample = lines[:max_items]
+        if options.processing_preset == "sentence_splitter":
+            return sentence_splitter_items(sample, options, options.positive_suffix)
         return randomize_text_items(sample, options, options.positive_suffix)
 
     rows, _dialect, _encoding = read_csv_file(path, options.csv_delimiter_mode, options.csv_encoding)
@@ -594,4 +753,6 @@ def preview_items_from_file(input_path: str | Path, options: RandomizerOptions, 
     header = has_csv_header(rows, options.csv_header_mode)
     start = 1 if header else 0
     values = [row[column_index] for row in rows[start:] if len(row) > column_index][:max_items]
+    if options.processing_preset == "sentence_splitter":
+        return sentence_splitter_items(values, options, suffix)
     return randomize_text_items(values, options, suffix)

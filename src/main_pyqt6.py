@@ -28,8 +28,8 @@ from PyQt6.QtWidgets import (
 
 from randomizer_engine import RandomizerOptions, preview_items_from_file, process_file
 
-APP_TITLE = "Prompt Chaos Randomizer – v1.0.11 – 2026-05-05"
-QUICK_GUIDE_TEXT = 'Prompt Chaos Randomizer – Quick Guide\n\nPurpose\n- Creates plain TXT wildcard lists for Stable Diffusion Forge / AUTOMATIC1111.\n- The output is always a .txt file, even when the input is a .csv file.\n- The original file is never overwritten. New files are saved beside the source as: originalname_changed_[date-time].txt\n\nWhat this tool does\n- Loads .txt files or Stable-Diffusion-style .csv files.\n- TXT mode: each source line becomes one wildcard output line.\n- CSV prompt mode: extracts only column 2 / prompt, randomizes it, and writes the result as TXT lines.\n- CSV negative prompt mode: extracts only column 3 / negative prompt, randomizes it, and writes the result as TXT lines.\n- CSV names, headers and other columns are not written to the output, because Forge/A1111 wildcard files need plain text lines.\n- Counts the period characters (.) inside each processed line or CSV field.\n- If there are no periods, it appends a period plus the matching balancing phrase.\n- If the period count is odd, it appends the matching balancing phrase.\n- Then it splits each text at period boundaries into halves, quarters, or a mixed chunk pool and recombines chunks from different lines into new randomized prompt text.\n- Optional expanded output can create up to 2x as many wildcard lines from the same source material.\n\nCSV Options\n- CSV header: auto-detect, force first row as header, or treat all rows as data.\n- CSV delimiter: auto-detect comma, semicolon or tab, or force a specific delimiter.\n\nChaos Mixer\n- Shuffle style: controls how aggressively text chunks are mixed.\n- Segment split: choose classic halves, quarters, or mixed halves + quarters. Quarters/mixed can create more varied fragments, especially when source lines contain several dot-separated parts.\n- Output amount: Normal keeps about one output line per source line; Expanded 2x adds an extra randomized line set for larger wildcard files.\n- Insertion: decides whether the recombined part is placed at the start, at the end, or randomly.\n- Chaos passes: repeats the process for stronger mutation.\n- Avoid pairing halves/chunks from the same original line: reduces self-recombination when possible.\n- Preserve blank lines: keeps empty lines in TXT files.\n- Clean repeated spaces: removes accidental double spaces after recombination.\n\nBalancing Phrases\n- Positive/TXT phrase is used for normal TXT lines and positive prompt fields.\n- Negative prompt phrase is used for negative prompt fields, so the added text remains useful for negative prompts.\n\nReproducibility\n- Leave the seed disabled for a fresh random result every time.\n- Enable a fixed seed when you want repeatable output for testing.\n\nUpdates\nNewer versions may be available in the repositories at github.com/zeittresor.'
+APP_TITLE = "Prompt Chaos Randomizer – v1.0.12 – 2026-05-11"
+QUICK_GUIDE_TEXT = 'Prompt Chaos Randomizer – Quick Guide\n\nPurpose\n- Creates plain TXT wildcard lists for Stable Diffusion Forge / AUTOMATIC1111.\n- The output is always a .txt file, even when the input is a .csv file.\n- The original file is never overwritten. New files are saved beside the source as: originalname_changed_[date-time].txt\n\nProcessing presets\n- Chaos randomizer: balances periods, splits lines at period boundaries into halves/quarters/mixed chunks, then recombines chunks into new wildcard lines.\n- Sentence splitter cleanup: turns every dot-ended sentence or sentence fragment into its own wildcard line, removes duplicate lines, merges very short fragments, and extends leftover short lines with the matching phrase.\n\nSource modes\n- TXT mode: reads each source line.\n- CSV prompt mode: extracts only column 2 / prompt and writes TXT wildcard lines.\n- CSV negative prompt mode: extracts only column 3 / negative prompt and writes TXT wildcard lines.\n- CSV names, headers and other columns are not written to the output.\n\nSentence splitter cleanup\n- Splits every line so each output line contains one sentence/sentence fragment ending with a dot.\n- If a source line has no dot, a dot is appended first.\n- Duplicate output lines are removed.\n- Short lines below the selected minimum length are combined with other short lines when possible.\n- If a short leftover cannot be paired cleanly, the matching positive/TXT or negative prompt phrase is appended.\n\nChaos mixer\n- Shuffle style controls how aggressively text chunks are mixed.\n- Segment split chooses classic halves, quarters, or mixed halves + quarters.\n- Output amount can create up to 2x as many wildcard lines.\n- Chaos passes repeats the mutation process.\n\nUpdates\nNewer versions may be available in the repositories at github.com/zeittresor.'
 
 
 class PromptChaosWindow(QMainWindow):
@@ -83,6 +83,10 @@ class PromptChaosWindow(QMainWindow):
 
         source_box = QGroupBox("Source Mode")
         source_layout = QGridLayout(source_box)
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("Chaos randomizer: mix chunks", "chaos")
+        self.preset_combo.addItem("Sentence splitter: split + dedupe", "sentence_splitter")
+        self.preset_combo.setToolTip("Choose the main processing workflow. Sentence splitter makes clean one-sentence-per-line wildcard TXT files.")
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("TXT: process each line", "txt")
         self.mode_combo.addItem("CSV: extract 2nd column / prompt -> TXT", "csv_prompt")
@@ -97,12 +101,14 @@ class PromptChaosWindow(QMainWindow):
         self.delimiter_combo.addItem("Comma ,", "comma")
         self.delimiter_combo.addItem("Semicolon ;", "semicolon")
         self.delimiter_combo.addItem("Tab", "tab")
-        source_layout.addWidget(QLabel("Processing target"), 0, 0)
-        source_layout.addWidget(self.mode_combo, 0, 1)
-        source_layout.addWidget(QLabel("CSV header"), 1, 0)
-        source_layout.addWidget(self.header_combo, 1, 1)
-        source_layout.addWidget(QLabel("CSV delimiter"), 2, 0)
-        source_layout.addWidget(self.delimiter_combo, 2, 1)
+        source_layout.addWidget(QLabel("Processing preset"), 0, 0)
+        source_layout.addWidget(self.preset_combo, 0, 1)
+        source_layout.addWidget(QLabel("Processing target"), 1, 0)
+        source_layout.addWidget(self.mode_combo, 1, 1)
+        source_layout.addWidget(QLabel("CSV header"), 2, 0)
+        source_layout.addWidget(self.header_combo, 2, 1)
+        source_layout.addWidget(QLabel("CSV delimiter"), 3, 0)
+        source_layout.addWidget(self.delimiter_combo, 3, 1)
         grid.addWidget(source_box, 0, 0)
 
         chaos_box = QGroupBox("Chaos Mixer")
@@ -124,6 +130,10 @@ class PromptChaosWindow(QMainWindow):
         self.placement_combo.addItem("Random start/end", "random")
         self.placement_combo.addItem("Insert at beginning", "prepend")
         self.placement_combo.addItem("Insert at end", "append")
+        self.min_sentence_spin = QSpinBox()
+        self.min_sentence_spin.setRange(8, 160)
+        self.min_sentence_spin.setValue(24)
+        self.min_sentence_spin.setToolTip("Sentence splitter: short fragments below this length are combined or extended with the matching phrase.")
         self.passes_spin = QSpinBox()
         self.passes_spin.setRange(1, 5)
         self.passes_spin.setValue(1)
@@ -142,11 +152,13 @@ class PromptChaosWindow(QMainWindow):
         chaos_layout.addWidget(self.output_factor_combo, 2, 1)
         chaos_layout.addWidget(QLabel("Insertion"), 3, 0)
         chaos_layout.addWidget(self.placement_combo, 3, 1)
-        chaos_layout.addWidget(QLabel("Chaos passes"), 4, 0)
-        chaos_layout.addWidget(self.passes_spin, 4, 1)
-        chaos_layout.addWidget(self.avoid_same_box, 5, 0, 1, 2)
-        chaos_layout.addWidget(self.keep_blanks_box, 6, 0, 1, 2)
-        chaos_layout.addWidget(self.normalize_spaces_box, 7, 0, 1, 2)
+        chaos_layout.addWidget(QLabel("Min splitter length"), 4, 0)
+        chaos_layout.addWidget(self.min_sentence_spin, 4, 1)
+        chaos_layout.addWidget(QLabel("Chaos passes"), 5, 0)
+        chaos_layout.addWidget(self.passes_spin, 5, 1)
+        chaos_layout.addWidget(self.avoid_same_box, 6, 0, 1, 2)
+        chaos_layout.addWidget(self.keep_blanks_box, 7, 0, 1, 2)
+        chaos_layout.addWidget(self.normalize_spaces_box, 8, 0, 1, 2)
         grid.addWidget(chaos_box, 0, 1)
 
         suffix_box = QGroupBox("Balancing Phrases")
@@ -315,9 +327,11 @@ class PromptChaosWindow(QMainWindow):
         seed = self.seed_spin.value() if self.use_seed_box.isChecked() else None
         return RandomizerOptions(
             mode=self.mode_combo.currentData(),
+            processing_preset=self.preset_combo.currentData(),
             shuffle_mode=self.shuffle_combo.currentData(),
             segment_mode=self.segment_combo.currentData(),
             output_factor=int(self.output_factor_combo.currentData()),
+            min_sentence_chars=self.min_sentence_spin.value(),
             placement_mode=self.placement_combo.currentData(),
             positive_suffix=self.positive_suffix_edit.text().strip() or "anything is matching well.",
             negative_suffix=self.negative_suffix_edit.text().strip() or "worse looking.",
@@ -369,6 +383,7 @@ class PromptChaosWindow(QMainWindow):
             f"Input:  {stats.input_path}" if stats.input_path else "Input:  preview sample",
             f"Output: {stats.output_path}" if stats.output_path else "Output: not saved",
             f"Mode: {stats.mode}",
+            f"Processing preset: {stats.processing_preset}",
             f"Processed items: {stats.processed_items}",
             f"Untouched items: {stats.untouched_items}",
             f"Zero-dot fixes: {stats.zero_dot_fixed}",
@@ -377,6 +392,10 @@ class PromptChaosWindow(QMainWindow):
             f"Chunks created: {stats.chunks_created}",
             f"Segment split: {stats.segment_mode}",
             f"Output amount: {stats.output_factor}x",
+            f"Min splitter length: {stats.min_sentence_chars}",
+            f"Duplicate lines removed: {stats.deduplicated_items}",
+            f"Short fragments merged: {stats.short_items_merged}",
+            f"Short leftovers extended: {stats.suffix_extended_items}",
             f"Passes: {stats.passes}",
             f"Seed: {stats.seed if stats.seed is not None else 'random every run'}",
         ]
